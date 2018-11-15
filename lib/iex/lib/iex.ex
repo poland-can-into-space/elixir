@@ -773,7 +773,7 @@ defmodule IEx do
       :ok = start_iex()
       :ok = set_expand_fun()
       :ok = run_after_spawn()
-      IEx.Server.start(opts, mfa)
+      IEx.Server.shell_start(opts, mfa)
     end)
   end
 

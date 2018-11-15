@@ -85,63 +85,47 @@ defmodule IEx.Server do
       "Interactive Elixir (#{System.version()}) - press Ctrl+C to exit (type h() ENTER for help)"
     )
 
+    unless opts[:shell] do
+      IEx.Broker.register(self())
+    end
+
     evaluator = start_evaluator(opts)
     loop(iex_state(opts), evaluator, Process.monitor(evaluator))
   end
 
   ## Private APIs
 
-  # `start/1` with a callback. The server is spawned only after
-  # the callback is done.
+  # Starts IEx to run directly from the Erlang shell.
+  #
+  # The server is spawned only after the callback is done.
   #
   # If there is any takeover during the callback execution
   # we spawn a new server for it without waiting for its
   # conclusion.
   @doc false
-  @spec start(keyword, {module, atom, [any]}) :: :ok
-  def start(opts, {m, f, a}) do
+  @spec shell_start(keyword, {module, atom, [any]}) :: :ok
+  def shell_start(opts, {m, f, a}) do
     Process.flag(:trap_exit, true)
     {pid, ref} = spawn_monitor(m, f, a)
-    start_loop(opts, pid, ref)
+    shell_loop(opts, pid, ref)
   end
 
-  defp start_loop(opts, pid, ref) do
+  defp shell_loop(opts, pid, ref) do
     receive do
-      {:take, take_pid, take_identifier, take_ref, take_opts} ->
+      {:take_over, take_pid, take_identifier, take_ref, take_opts} ->
         if allow_take?(take_identifier) do
-          send(take_pid, {take_ref, Process.group_leader()})
-          start(take_opts)
+          send(take_pid, {:accept, take_ref, self(), Process.group_leader()})
+          start([shell: true] ++ take_opts)
         else
-          send(take_pid, {take_ref, nil})
-          start_loop(opts, pid, ref)
+          send(take_pid, {:refuse, take_ref})
+          shell_loop(opts, pid, ref)
         end
 
       {:DOWN, ^ref, :process, ^pid, :normal} ->
-        start(opts)
+        start([shell: true] ++ opts)
 
       {:DOWN, ^ref, :process, ^pid, _reason} ->
         :ok
-    end
-  end
-
-  # Requests to take over the given shell from the current process.
-  @doc false
-  @spec take_over(binary, keyword) :: :ok | {:error, :no_iex} | {:error, :refused}
-  def take_over(identifier, opts, server \\ whereis()) do
-    if is_nil(server) do
-      {:error, :no_iex}
-    else
-      ref = make_ref()
-      opts = [evaluator: self()] ++ opts
-      send(server, {:take, self(), identifier, ref, opts})
-
-      receive do
-        {^ref, nil} ->
-          {:error, :refused}
-
-        {^ref, leader} ->
-          IEx.Evaluator.init(:no_ack, server, leader, opts)
-      end
     end
   end
 
@@ -231,7 +215,7 @@ defmodule IEx.Server do
   # A take process may also happen if the evaluator dies,
   # then a new evaluator is created to replace the dead one.
   defp handle_take_over(
-         {:take, other, identifier, ref, opts},
+         {:take_over, other, identifier, take_ref, opts},
          state,
          evaluator,
          evaluator_ref,
@@ -240,16 +224,16 @@ defmodule IEx.Server do
        ) do
     cond do
       evaluator == opts[:evaluator] ->
-        send(other, {ref, Process.group_leader()})
+        send(other, {:accept, take_ref, self(), Process.group_leader()})
         kill_input(input)
         loop(iex_state(opts), evaluator, evaluator_ref)
 
       allow_take?(identifier) ->
-        send(other, {ref, Process.group_leader()})
+        send(other, {:accept, take_ref, self(), Process.group_leader()})
         restart(opts, evaluator, evaluator_ref, input)
 
       true ->
-        send(other, {ref, nil})
+        send(other, {:refuse, take_ref})
         callback.(state)
     end
   end
